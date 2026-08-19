@@ -12,6 +12,7 @@ env/
 build/
 dist/
 installer_output/
+release/
 
 # IDE / 编辑器
 .vscode/
