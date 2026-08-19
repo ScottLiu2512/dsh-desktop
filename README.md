@@ -11,6 +11,10 @@ DeepSeek Harness（DSH）桌面客户端（Windows）。把 DSH 的 Web 界面�
 - **图形化配置**：API Key、模型、推理强度、工作区目录、端口，无需手改配置文件
 - **日志面板 + 状态栏**：实时查看 dsh 进程输出，便于排查问题
 
+## 界面预览
+
+![DSH Desktop 运行截图](https://github.com/ScottLiu2512/dsh-desktop/releases/download/v1.0.0/screenshot.png)
+
 ## 环境要求
 
 - Windows 10 及以上
