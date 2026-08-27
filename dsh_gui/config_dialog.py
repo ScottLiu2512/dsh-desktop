@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import config_store
+from .dsh_manager import DEFAULT_PORT, coerce_port
 
 
 class ConfigDialog(QDialog):
@@ -55,7 +56,7 @@ class ConfigDialog(QDialog):
             self.effort_combo.setCurrentText(current_effort)
 
         # 工作区目录
-        self.workspace_edit = QLineEdit(settings.value("workspace", str(Path.home())))
+        self.workspace_edit = QLineEdit(str(settings.value("workspace", str(Path.home()))))
         browse_btn = QPushButton("浏览…")
         browse_btn.clicked.connect(self._browse_workspace)
         ws_row = QHBoxLayout()
@@ -65,7 +66,7 @@ class ConfigDialog(QDialog):
         # 端口
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1024, 65535)
-        self.port_spin.setValue(int(settings.value("port", 3080)))
+        self.port_spin.setValue(coerce_port(settings.value("port", DEFAULT_PORT)))
 
         form = QFormLayout()
         form.addRow("API Key（DEEPSEEK_API_KEY）", key_row)

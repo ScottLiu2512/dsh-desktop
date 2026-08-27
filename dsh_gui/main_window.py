@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 
 from .about_dialog import AboutDialog
 from .config_dialog import ConfigDialog
-from .dsh_manager import DshManager
+from .dsh_manager import DEFAULT_PORT, DshManager
 
 
 class MainWindow(QMainWindow):
@@ -28,10 +28,9 @@ class MainWindow(QMainWindow):
 
         self.manager = DshManager(self)
         self._eperm_hinted = False
-        workspace = str(self._settings.value("workspace", str(Path.home())))
-        port = int(self._settings.value("port", 3080))
-        self.manager.set_workspace(workspace)
-        self.manager.set_port(port)
+        # 两个 setter 自己会做容错，注册表里存了脏值也不会让窗口构造失败。
+        self.manager.set_workspace(self._settings.value("workspace", str(Path.home())))
+        self.manager.set_port(self._settings.value("port", DEFAULT_PORT))
 
         # 内嵌浏览器
         self.web = QWebEngineView(self)

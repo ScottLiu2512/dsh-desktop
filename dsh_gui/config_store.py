@@ -19,8 +19,17 @@ def dsh_home() -> Path:
     return Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh"))
 
 
-CREDENTIALS_FILE = dsh_home() / ".credentials.yaml"
-SETTINGS_FILE = dsh_home() / "settings.yaml"
+# 下面两个路径都用函数而非模块级常量：常量会在 import 时就把 DSH_HOME 的值
+# 固化下来，之后再改环境变量就不生效了。
+def credentials_file() -> Path:
+    """凭据文件路径（API Key 等）。"""
+    return dsh_home() / ".credentials.yaml"
+
+
+def settings_file() -> Path:
+    """设置文件路径（默认模型等）。"""
+    return dsh_home() / "settings.yaml"
+
 
 DEFAULT_PROVIDER = "deepseek-official"
 DEFAULT_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"]
@@ -52,29 +61,31 @@ def _write_yaml(path: Path, data: dict) -> None:
 
 def get_api_key() -> str:
     """读取 DeepSeek API Key（可能为空字符串）。"""
-    return str(_read_yaml(CREDENTIALS_FILE).get("DEEPSEEK_API_KEY", "") or "")
+    return str(_read_yaml(credentials_file()).get("DEEPSEEK_API_KEY", "") or "")
 
 
 def set_api_key(key: str) -> None:
     """写入 DeepSeek API Key；传入空字符串表示删除。"""
-    data = _read_yaml(CREDENTIALS_FILE)
+    path = credentials_file()
+    data = _read_yaml(path)
     key = (key or "").strip()
     if key:
         data["DEEPSEEK_API_KEY"] = key
     else:
         data.pop("DEEPSEEK_API_KEY", None)
-    _write_yaml(CREDENTIALS_FILE, data)
+    _write_yaml(path, data)
 
 
 def get_default_model_config() -> dict:
     """读取默认模型配置（provider / model / reasoningEffort）。"""
-    cfg = _read_yaml(SETTINGS_FILE).get("agent-default-model", {})
+    cfg = _read_yaml(settings_file()).get("agent-default-model", {})
     return cfg if isinstance(cfg, dict) else {}
 
 
 def set_default_model_config(model: str, reasoning_effort: str) -> None:
     """写入默认模型配置，保留现有 provider（默认 deepseek-official）。"""
-    data = _read_yaml(SETTINGS_FILE)
+    path = settings_file()
+    data = _read_yaml(path)
     existing = data.get("agent-default-model", {})
     provider = (
         existing.get("provider", DEFAULT_PROVIDER)
@@ -86,4 +97,4 @@ def set_default_model_config(model: str, reasoning_effort: str) -> None:
         "model": model,
         "reasoningEffort": reasoning_effort,
     }
-    _write_yaml(SETTINGS_FILE, data)
+    _write_yaml(path, data)

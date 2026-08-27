@@ -14,19 +14,33 @@ _URL_RE = re.compile(r"https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?", re
 # 去掉终端 ANSI 颜色码，便于在日志面板里阅读。
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+DEFAULT_PORT = 3080
+INSTALL_HINT = "请先安装 Node.js 22 或更高版本，然后执行：npm install -g @deepseek-ai/dsh"
 
-def find_dsh() -> str:
-    """在 PATH 与常见 npm 全局目录中查找 dsh 可执行文件。"""
+
+def coerce_port(value, default: int = DEFAULT_PORT) -> int:
+    """把任意来源（QSettings 可能返回字符串）的端口值收敛成合法端口号。"""
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return default
+    return port if 1024 <= port <= 65535 else default
+
+
+def find_dsh():
+    """在 PATH 与常见 npm 全局目录中查找 dsh 可执行文件；找不到返回 None。"""
     for name in ("dsh.cmd", "dsh", "dsh.exe"):
         found = shutil.which(name)
         if found:
             return found
-    npm_dir = Path(os.environ.get("APPDATA", "")) / "npm"
-    for name in ("dsh.cmd", "dsh.ps1", "dsh"):
-        candidate = npm_dir / name
-        if candidate.exists():
-            return str(candidate)
-    return "dsh"
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        npm_dir = Path(appdata) / "npm"
+        for name in ("dsh.cmd", "dsh.ps1", "dsh"):
+            candidate = npm_dir / name
+            if candidate.exists():
+                return str(candidate)
+    return None
 
 
 class DshManager(QObject):
@@ -42,17 +56,27 @@ class DshManager(QObject):
         self._reader = None
         self._url = None
         self._workspace = str(Path.home())
-        self._port = 3080
+        self._port = DEFAULT_PORT
 
     # ---- 配置 ----
-    def set_workspace(self, path: str) -> None:
-        p = Path(path).expanduser()
-        if not p.exists():
-            p.mkdir(parents=True, exist_ok=True)
-        self._workspace = str(p)
+    def set_workspace(self, path) -> None:
+        """记录工作区目录。
 
-    def set_port(self, port: int) -> None:
-        self._port = int(port) if port else 3080
+        这里只做路径解析、不创建目录：本方法在窗口构造期间就会被调用，
+        若此时因为盘符失效或权限不足抛异常，整个应用会起不来。目录的
+        实际创建与校验放在 start() 里，失败可以走日志提示。
+        """
+        text = str(path or "").strip()
+        if not text:
+            self._workspace = str(Path.home())
+            return
+        try:
+            self._workspace = str(Path(text).expanduser())
+        except (OSError, ValueError, RuntimeError):
+            self._workspace = text
+
+    def set_port(self, port) -> None:
+        self._port = coerce_port(port)
 
     @property
     def workspace(self) -> str:
@@ -75,7 +99,21 @@ class DshManager(QObject):
     def start(self) -> bool:
         if self.is_running:
             return False
+        # 注意：下面用了 shell=True（为了能执行 dsh.cmd），这会让 Popen 实际启动
+        # 的是 cmd.exe —— 即使 dsh 不存在也能创建成功，异常分支捕获不到。
+        # 所以这里必须先自己查一遍，否则用户只会看到一句莫名其妙的「退出码 1」。
         exe = find_dsh()
+        if exe is None:
+            self.log_line.emit(f"[启动失败] 未找到 dsh 可执行文件。{INSTALL_HINT}")
+            return False
+        try:
+            Path(self._workspace).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.log_line.emit(
+                f"[启动失败] 无法使用工作区目录 {self._workspace}：{exc}"
+                "。请在「设置」里换一个可写的目录。"
+            )
+            return False
         cmd = [exe, "web"]
         if self._port:
             cmd += ["--port", str(self._port)]
@@ -108,18 +146,28 @@ class DshManager(QObject):
             self._proc = None
             return
         # 用 taskkill 结束整棵进程树（node 可能再拉起子进程）。
+        # taskkill 失败时不会抛异常，只是返回非零码，所以要显式判断返回值，
+        # 否则杀不掉进程时界面会一直卡在「运行中」。
+        killed = False
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
             )
-        except Exception:
+            killed = result.returncode == 0
+        except Exception as exc:  # noqa: BLE001
+            self.log_line.emit(f"[停止] taskkill 无法执行：{exc}")
+        # 进程仍活着才需要兜底，避免它已自行退出时打出多余的提示。
+        if not killed and proc.poll() is None:
+            self.log_line.emit("[停止] taskkill 未能结束进程树，改为直接结束主进程。")
             try:
                 proc.kill()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                self.log_line.emit(
+                    f"[停止] 结束进程失败：{exc}。可能需要在任务管理器里手动结束 node 进程。"
+                )
 
     # ---- 输出读取 ----
     def _read_loop(self) -> None:
