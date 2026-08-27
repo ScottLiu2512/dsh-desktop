@@ -14,6 +14,9 @@ dist/
 installer_output/
 release/
 
+# 宣传素材（generate_promo_images.py 生成，依赖 release/screenshot.png，可重新生成）
+promo/
+
 # IDE / 编辑器
 .vscode/
 .idea/

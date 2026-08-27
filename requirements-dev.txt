@@ -1,0 +1,2 @@
+# 构建/素材脚本用（generate_icon.py、generate_promo_images.py），运行 app 本体不需要。
+Pillow>=10.0

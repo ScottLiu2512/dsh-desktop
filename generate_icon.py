@@ -2,6 +2,7 @@
 
 用法：python generate_icon.py
 产物：icon.ico（含 256/128/64/48/32/16 多尺寸）
+依赖：Pillow（见 requirements-dev.txt）
 """
 
 from pathlib import Path
