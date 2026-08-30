@@ -4,7 +4,7 @@ DeepSeek Harness（DSH）桌面客户端（Windows）。把 DSH 的 Web 界面�
 
 > 说明：本应用是 DeepSeek Harness 的**客户端外壳**，不包含 Harness 本体，运行前需要先安装 Node.js 和 `dsh`。
 >
-> 当前版本：v1.0.8 ｜ [Releases](https://github.com/ScottLiu2512/dsh-desktop/releases)
+> 当前版本：v1.0.9 ｜ [Releases](https://github.com/ScottLiu2512/dsh-desktop/releases)
 
 ## 功能特性
 
@@ -36,6 +36,8 @@ DeepSeek Harness（DSH）桌面客户端（Windows）。把 DSH 的 Web 界面�
 
 在 [Releases 页面](https://github.com/ScottLiu2512/dsh-desktop/releases/latest) 下载 `DSH-Desktop.exe`，双击即可运行，无需安装。
 
+> 单文件版每次启动都要把全部依赖解压到临时目录，启动明显更慢（实测约 8 秒 vs 安装版约 2 秒），装了安全软件的机器还可能因此反复触发扫描。长期使用建议用安装包。
+
 ### 方式三：从源码运行
 
 ```bash
@@ -55,14 +57,19 @@ python main.py
 
 ## 打包（可选）
 
+两种产物共用同一份源码，取舍见 `build_common.py` 里的说明。
+
 ```bash
 # 安装打包依赖（PyInstaller）
 pip install pyinstaller
 
-# 生成单文件 exe
-python -m PyInstaller dsh_gui.spec --noconfirm --clean
+# 目录版 → dist\DSH-Desktop\（安装包用，启动快、不占临时目录）
+python -m PyInstaller dsh_gui_onedir.spec --noconfirm --clean
 
-# 生成安装包（需先安装 Inno Setup 6）
+# 单文件版 → dist\DSH-Desktop.exe（免安装绿色版）
+python -m PyInstaller dsh_gui.spec --noconfirm
+
+# 生成安装包（需先安装 Inno Setup 6；依赖上面的目录版产物）
 ISCC.exe dsh_client_setup.iss
 ```
 
