@@ -2,20 +2,35 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
+from PySide6.QtCore import QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QDockWidget,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QToolBar,
 )
 
+from . import __version__
 from .about_dialog import AboutDialog
 from .config_dialog import ConfigDialog
 from .dsh_manager import DEFAULT_PORT, DshManager
+from .update_dialog import UpdateDialog
+from .updater import VersionCheck, version_gt
+
+
+class _ClickableLabel(QLabel):
+    """带点击信号的 QLabel，用于状态栏的升级提示。"""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -65,6 +80,14 @@ class MainWindow(QMainWindow):
         self._url_timer.setSingleShot(True)
         self._url_timer.timeout.connect(self._on_url_timeout)
 
+        # 更新检测：启动 3 秒后自动检查一次（失败静默），也可手动触发。
+        self._last_update_info = None
+        self._update_dialog = None
+        self._update_checker = VersionCheck(self)
+        self._update_checker.finished.connect(self._on_update_check)
+        self._update_checker.failed.connect(self._on_update_check_failed)
+        QTimer.singleShot(3000, self._check_updates)
+
         self._restore_geometry()
 
     # ---- UI 构建 ----
@@ -106,6 +129,10 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
+        self.update_action = QAction("检查更新", self)
+        self.update_action.triggered.connect(self._check_updates)
+        toolbar.addAction(self.update_action)
+
         self.about_action = QAction("关于", self)
         self.about_action.triggered.connect(self._open_about)
         toolbar.addAction(self.about_action)
@@ -113,6 +140,16 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self) -> None:
         self.status_label = QLabel("已停止")
         self.statusBar().addWidget(self.status_label)
+
+        # 发现新版本时的可点击提示（默认隐藏）
+        self.update_label = _ClickableLabel("")
+        self.update_label.setStyleSheet(
+            "color:#2a6fd4; text-decoration:underline; padding:0 8px;"
+        )
+        self.update_label.setCursor(Qt.PointingHandCursor)
+        self.update_label.hide()
+        self.update_label.clicked.connect(self._open_update_dialog)
+        self.statusBar().addPermanentWidget(self.update_label)
 
     # ---- 动作 ----
     def _start(self) -> None:
@@ -189,6 +226,42 @@ class MainWindow(QMainWindow):
             self.web.load(QUrl(url))
             self.open_action.setEnabled(True)
             self._set_status(f"运行中：{url}")
+
+    # ---- 更新检测 ----
+    def _check_updates(self, manual: bool = False) -> None:
+        """检查更新；manual=True 时（用户点击按钮）失败/无更新会给反馈。"""
+        self._manual_check = manual
+        if manual:
+            self._set_status("正在检查更新…")
+        self._update_checker.check()
+
+    def _on_update_check(self, info) -> None:
+        latest = info["tag"]
+        if not version_gt(latest, __version__):
+            if self._manual_check:
+                QMessageBox.information(self, "检查更新", f"已是最新版本（{__version__}）。")
+                self._set_status("已停止")
+            return
+        self._last_update_info = info
+        self.update_label.setText(f"发现新版本 {latest}，点击升级")
+        self.update_label.show()
+        self._open_update_dialog()
+
+    def _on_update_check_failed(self, msg: str) -> None:
+        # 自动检查失败保持静默，避免打扰；手动检查才提示。
+        if self._manual_check:
+            QMessageBox.warning(self, "检查更新", f"检查更新失败：{msg}")
+            self._set_status("已停止")
+
+    def _open_update_dialog(self) -> None:
+        if not self._last_update_info:
+            return
+        if self._update_dialog is not None and self._update_dialog.isVisible():
+            self._update_dialog.raise_()
+            self._update_dialog.activateWindow()
+            return
+        self._update_dialog = UpdateDialog(self, self._last_update_info)
+        self._update_dialog.exec()
 
     # ---- 辅助 ----
     def _set_status(self, text: str) -> None:
