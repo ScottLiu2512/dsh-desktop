@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -31,12 +32,20 @@ def _format_size(size: int) -> str:
 class SessionCleanupDialog(QDialog):
     def __init__(self, workspace: str, parent=None):
         super().__init__(parent)
-        self._workspace = workspace
         self.setWindowTitle("会话清理")
         self.setMinimumSize(560, 420)
 
+        workspace_label = QLabel("工作区：")
+        self.workspace_combo = QComboBox()
+        self.workspace_combo.setMinimumWidth(280)
+        self.workspace_combo.currentIndexChanged.connect(self._on_workspace_changed)
         self._hint = QLabel()
         self._hint.setStyleSheet("color: gray;")
+        workspace_row = QHBoxLayout()
+        workspace_row.addWidget(workspace_label)
+        workspace_row.addWidget(self.workspace_combo)
+        workspace_row.addWidget(self._hint)
+        workspace_row.addStretch(1)
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["", "创建时间", "大小", "状态"])
@@ -50,7 +59,7 @@ class SessionCleanupDialog(QDialog):
         select_none_btn = QPushButton("取消全选")
         select_none_btn.clicked.connect(self._select_none)
         refresh_btn = QPushButton("刷新")
-        refresh_btn.clicked.connect(self._reload)
+        refresh_btn.clicked.connect(self._reload_workspaces)
 
         top_row = QHBoxLayout()
         top_row.addWidget(select_empty_btn)
@@ -69,16 +78,48 @@ class SessionCleanupDialog(QDialog):
         bottom_row.addWidget(close_btn)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._hint)
+        layout.addLayout(workspace_row)
         layout.addLayout(top_row)
         layout.addWidget(self.table)
         layout.addLayout(bottom_row)
 
+        self._all_sessions = []
         self._sessions = []
-        self._reload()
+        self._reload_workspaces(select=workspace)
 
-    def _reload(self) -> None:
-        self._sessions = session_cleanup.list_sessions_for_workspace(self._workspace)
+    def _reload_workspaces(self, select: str = "") -> None:
+        """重新扫描全部会话、重建工作区下拉框；再据此刷新表格。
+
+        ``select`` 只在首次打开（构造函数传入当前配置的工作区）或明确指定时
+        使用；点「刷新」按钮触发时留空，保留用户当前选中的工作区不变
+        ——即使它此刻一个会话都没有，也要保留在下拉框里，不能让用户选着选着
+        选项就消失了。
+        """
+        target = select or self.workspace_combo.currentText()
+        self._all_sessions = session_cleanup.list_all_sessions()
+        workspaces = session_cleanup.list_workspaces(self._all_sessions)
+        if target and target not in workspaces:
+            workspaces.insert(0, target)
+
+        self.workspace_combo.blockSignals(True)
+        self.workspace_combo.clear()
+        self.workspace_combo.addItems(workspaces)
+        if target:
+            index = self.workspace_combo.findText(target)
+            if index >= 0:
+                self.workspace_combo.setCurrentIndex(index)
+        self.workspace_combo.blockSignals(False)
+
+        self._reload_table()
+
+    def _on_workspace_changed(self, _index: int) -> None:
+        self._reload_table()
+
+    def _reload_table(self) -> None:
+        workspace = self.workspace_combo.currentText()
+        self._sessions = session_cleanup.list_sessions_for_workspace(
+            workspace, self._all_sessions
+        )
         self.table.setRowCount(len(self._sessions))
         for row, info in enumerate(self._sessions):
             check_item = QTableWidgetItem()
@@ -97,11 +138,9 @@ class SessionCleanupDialog(QDialog):
             self.table.setItem(row, 3, status_item)
         self.table.resizeColumnsToContents()
         if not self._sessions:
-            self._hint.setText(f"工作区：{self._workspace}（没有找到会话）")
+            self._hint.setText("没有找到会话")
         else:
-            self._hint.setText(
-                f"工作区：{self._workspace}（共 {len(self._sessions)} 个会话）"
-            )
+            self._hint.setText(f"共 {len(self._sessions)} 个会话")
 
     def _select_empty(self) -> None:
         for row, info in enumerate(self._sessions):
@@ -140,6 +179,6 @@ class SessionCleanupDialog(QDialog):
                 session_cleanup.delete_session(info)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{info.id[:20]}…：{exc}")
-        self._reload()
+        self._reload_workspaces()
         if errors:
             QMessageBox.warning(self, "部分删除失败", "\n".join(errors))
