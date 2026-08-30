@@ -10,9 +10,9 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
-    QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QTextBrowser,
     QVBoxLayout,
 )
 
@@ -39,9 +39,11 @@ class UpdateDialog(QDialog):
         ver = QLabel(f"当前版本 {__version__}　→　最新版本 {latest_tag}")
         ver.setStyleSheet("color: gray;")
 
-        self._notes = QPlainTextEdit(self._info.get("body") or "（该版本没有更新说明）")
+        self._notes = QTextBrowser()
         self._notes.setReadOnly(True)
+        self._notes.setOpenExternalLinks(True)
         self._notes.setMaximumHeight(160)
+        self._notes.setMarkdown(self._info.get("body") or "（该版本没有更新说明）")
 
         # 下载区（默认隐藏）
         self._progress = QProgressBar()
