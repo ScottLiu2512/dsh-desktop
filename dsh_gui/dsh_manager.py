@@ -5,6 +5,8 @@ import re
 import shutil
 import subprocess
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -19,6 +21,12 @@ _NPM_SHIM_ENTRY_RE = re.compile(r'"%dp0%\\([^"]+\.js)"')
 
 DEFAULT_PORT = 3080
 INSTALL_HINT = "请先安装 Node.js 22 或更高版本，然后执行：npm install -g @deepseek-ai/dsh"
+# 只探测本机 loopback，能连上通常几十毫秒内就有结果；但端口真的空着时，
+# 有些安全软件会直接丢包不回 RST，导致连接尝试要等到超时才罢休——实测在
+# 有安全软件拦截的机器上能到 0.8 秒。这个值不能设太长，否则「全新启动、
+# 端口本来就没人占」这个最常见的场景每次都会被平白拖慢；也不能太短，
+# 否则可能把「正在应答、只是慢了一点」误判成没有服务。
+_PROBE_TIMEOUT = 0.3
 
 
 def coerce_port(value, default: int = DEFAULT_PORT) -> int:
@@ -119,6 +127,7 @@ class DshManager(QObject):
         self._proc = None
         self._reader = None
         self._url = None
+        self._adopted = False  # True 表示接上的是别的进程起的 dsh，不是本类自己管的
         self._workspace = str(Path.home())
         self._port = DEFAULT_PORT
 
@@ -153,7 +162,7 @@ class DshManager(QObject):
     # ---- 状态 ----
     @property
     def is_running(self) -> bool:
-        return self._proc is not None and self._proc.poll() is None
+        return self._adopted or (self._proc is not None and self._proc.poll() is None)
 
     @property
     def url(self):
@@ -163,6 +172,19 @@ class DshManager(QObject):
     def start(self) -> bool:
         if self.is_running:
             return False
+        # 配置的端口上如果已经有能正常应答的服务（通常是之前一次启动留下的、
+        # 没被这个 DshManager 实例管理到的孤儿 dsh 进程——比如应用重开过一次），
+        # 直接接上用，不要再起一个新的去抢端口，那样只会撞 EADDRINUSE 白白
+        # 报一次「启动失败」，而端口上其实一直有个健康的实例在服务。
+        existing_url = self._probe_existing_server()
+        if existing_url is not None:
+            self._adopted = True
+            self._url = existing_url
+            self.log_line.emit(
+                f"[提示] 端口 {self._port} 上已经有 dsh 在正常服务（不是这次启动的），直接接上使用。"
+            )
+            self.started.emit(existing_url)
+            return True
         # 注意：找不到 dsh 时，走 shell=True 分支的 Popen 也能创建成功（真正
         # 失败的是里面的 cmd.exe），异常分支捕获不到，所以必须先自己查一遍，
         # 否则用户只会看到一句莫名其妙的「退出码 1」。
@@ -217,7 +239,30 @@ class DshManager(QObject):
         self._reader.start()
         return True
 
+    def _probe_existing_server(self):
+        """探测配置端口上有没有已经能响应的服务；有则返回其 URL，没有返回 None。
+
+        只是想知道「有没有东西在应答」，不关心具体返回什么内容或状态码——
+        HTTPError 本身就说明端口上有服务在处理请求。
+        """
+        url = f"http://127.0.0.1:{self._port}"
+        try:
+            urllib.request.urlopen(url, timeout=_PROBE_TIMEOUT)
+        except urllib.error.HTTPError:
+            pass
+        except Exception:
+            return None
+        return url
+
     def stop(self) -> None:
+        if self._adopted:
+            self._adopted = False
+            self._url = None
+            self.log_line.emit(
+                "[停止] 这是接上的外部 dsh 实例，不是本程序启动的，不会去结束它的进程——只是断开显示。"
+            )
+            self.stopped.emit(0)
+            return
         proc = self._proc
         if proc is None or proc.poll() is not None:
             self._proc = None
