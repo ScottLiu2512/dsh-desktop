@@ -129,7 +129,12 @@ class DshManager(QObject):
         cmd = [exe, "web"]
         if self._port:
             cmd += ["--port", str(self._port)]
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        # CREATE_NO_WINDOW：shell=True 会让 Popen 实际启动 cmd.exe，而这个 GUI
+        # 应用本身没有控制台，Windows 默认会给 cmd.exe 新开一个可见的黑窗口。
+        creationflags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
         try:
             self._proc = subprocess.Popen(
                 cmd,
@@ -170,6 +175,7 @@ class DshManager(QObject):
                 # 防止 taskkill 卡住时主线程无限等待导致窗口「未响应」；
                 # 超时后走下面的兜底直接 kill 主进程。
                 timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             killed = result.returncode == 0
         except subprocess.TimeoutExpired:
