@@ -13,6 +13,9 @@ from PySide6.QtCore import QObject, Signal
 _URL_RE = re.compile(r"https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?", re.IGNORECASE)
 # 去掉终端 ANSI 颜色码，便于在日志面板里阅读。
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# npm 在 Windows 上生成的 .cmd shim 里，真正的入口永远是形如
+# "%dp0%\node_modules\...\xxx.js" 的一段（cmd-shim 模板多年未变）。
+_NPM_SHIM_ENTRY_RE = re.compile(r'"%dp0%\\([^"]+\.js)"')
 
 DEFAULT_PORT = 3080
 INSTALL_HINT = "请先安装 Node.js 22 或更高版本，然后执行：npm install -g @deepseek-ai/dsh"
@@ -25,6 +28,26 @@ def coerce_port(value, default: int = DEFAULT_PORT) -> int:
     except (TypeError, ValueError):
         return default
     return port if 1024 <= port <= 65535 else default
+
+
+def _hidden_window_kwargs() -> dict:
+    """构造隐藏控制台窗口所需的 Popen 参数。
+
+    单独的 CREATE_NO_WINDOW 在启用了「Windows 终端」作为默认终端的系统上并不
+    可靠——控制台的转接（handoff）机制会绕过这个标志，仍然弹出一个可见的
+    终端窗口（Windows 11 的已知行为）。额外带上 STARTUPINFO + SW_HIDE 双重
+    保险，两者互不冲突，其中任意一个生效都能压住窗口。
+    """
+    if not hasattr(subprocess, "STARTUPINFO"):
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    creationflags = (
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    )
+    return {"startupinfo": startupinfo, "creationflags": creationflags}
 
 
 _find_dsh_cache = None
@@ -53,6 +76,38 @@ def find_dsh():
                 _find_dsh_cache = str(candidate)
                 return str(candidate)
     return None
+
+
+def _resolve_npm_shim(shim_path: str):
+    """把 npm 的 .cmd shim 拆解成「真正执行的 node.exe + 入口脚本」。
+
+    根源问题：shim 是批处理脚本，只能靠 cmd.exe 解释执行；而 cmd.exe 在
+    Windows 11 且系统默认终端是「Windows 终端」时，会触发终端转接
+    （terminal handoff）弹出一个可见窗口——这个转接绑定在 cmd.exe 自己的
+    manifest 上，CREATE_NO_WINDOW / STARTUPINFO 都压不住（实测确认）。
+    直接调用 node.exe 完全不会触发这套机制，所以能拆解就不经过 cmd.exe。
+
+    拆解失败（shim 格式不是预期的 npm cmd-shim 模板、或 node.exe 找不到）
+    时返回 None，调用方应回退到 shell=True 的方式。
+    """
+    try:
+        text = Path(shim_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _NPM_SHIM_ENTRY_RE.search(text)
+    if not match:
+        return None
+    entry = Path(shim_path).parent / match.group(1)
+    if not entry.exists():
+        return None
+    shim_dir = Path(shim_path).parent
+    node_exe = shim_dir / "node.exe"
+    if not node_exe.exists():
+        found = shutil.which("node.exe") or shutil.which("node")
+        if not found:
+            return None
+        node_exe = Path(found)
+    return [str(node_exe), str(entry)]
 
 
 class DshManager(QObject):
@@ -111,9 +166,9 @@ class DshManager(QObject):
     def start(self) -> bool:
         if self.is_running:
             return False
-        # 注意：下面用了 shell=True（为了能执行 dsh.cmd），这会让 Popen 实际启动
-        # 的是 cmd.exe —— 即使 dsh 不存在也能创建成功，异常分支捕获不到。
-        # 所以这里必须先自己查一遍，否则用户只会看到一句莫名其妙的「退出码 1」。
+        # 注意：找不到 dsh 时，走 shell=True 分支的 Popen 也能创建成功（真正
+        # 失败的是里面的 cmd.exe），异常分支捕获不到，所以必须先自己查一遍，
+        # 否则用户只会看到一句莫名其妙的「退出码 1」。
         exe = find_dsh()
         if exe is None:
             self.log_line.emit(f"[启动失败] 未找到 dsh 可执行文件。{INSTALL_HINT}")
@@ -126,20 +181,28 @@ class DshManager(QObject):
                 "。请在「设置」里换一个可写的目录。"
             )
             return False
-        cmd = [exe, "web"]
+
+        args = ["web"]
         if self._port:
-            cmd += ["--port", str(self._port)]
-        # CREATE_NO_WINDOW：shell=True 会让 Popen 实际启动 cmd.exe，而这个 GUI
-        # 应用本身没有控制台，Windows 默认会给 cmd.exe 新开一个可见的黑窗口。
-        creationflags = (
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
+            args += ["--port", str(self._port)]
+
+        # dsh 在 Windows 上通常是 npm 生成的 .cmd shim，只能靠 cmd.exe 解释
+        # 执行；但 cmd.exe 在启用了「Windows 终端」默认转接的系统上会弹出
+        # 一个可见窗口，CREATE_NO_WINDOW/STARTUPINFO 都压不住（实测确认）。
+        # 能拆解出真正的 node.exe + 入口脚本就直接调用，彻底绕开 cmd.exe；
+        # 拆不出来（非 npm shim、node 找不到等）就退回 shell=True。
+        resolved = _resolve_npm_shim(exe) if exe.lower().endswith((".cmd", ".bat")) else None
+        if resolved:
+            cmd = resolved + args
+            shell = False
+        else:
+            cmd = [exe] + args
+            shell = True
         try:
             self._proc = subprocess.Popen(
                 cmd,
                 cwd=self._workspace,
-                shell=True,
+                shell=shell,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -147,7 +210,7 @@ class DshManager(QObject):
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
-                creationflags=creationflags,
+                **_hidden_window_kwargs(),
             )
         except Exception as exc:  # noqa: BLE001
             self.log_line.emit(f"[启动失败] {exc}")
@@ -175,7 +238,7 @@ class DshManager(QObject):
                 # 防止 taskkill 卡住时主线程无限等待导致窗口「未响应」；
                 # 超时后走下面的兜底直接 kill 主进程。
                 timeout=5,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                **_hidden_window_kwargs(),
             )
             killed = result.returncode == 0
         except subprocess.TimeoutExpired:
