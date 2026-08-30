@@ -18,6 +18,7 @@ from . import __version__
 from .about_dialog import AboutDialog
 from .config_dialog import ConfigDialog
 from .dsh_manager import DEFAULT_PORT, DshManager
+from .session_cleanup_dialog import SessionCleanupDialog
 from .update_dialog import UpdateDialog
 from .updater import VersionCheck, version_gt
 
@@ -129,6 +130,12 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
+        self.session_cleanup_action = QAction("会话清理", self)
+        self.session_cleanup_action.triggered.connect(self._open_session_cleanup)
+        toolbar.addAction(self.session_cleanup_action)
+
+        toolbar.addSeparator()
+
         self.update_action = QAction("检查更新", self)
         self.update_action.triggered.connect(self._check_updates)
         toolbar.addAction(self.update_action)
@@ -173,6 +180,9 @@ class MainWindow(QMainWindow):
             self.manager.set_workspace(dialog.workspace())
             self.manager.set_port(dialog.port())
             self._append_log("> 配置已保存（重启 dsh 后生效）")
+
+    def _open_session_cleanup(self) -> None:
+        SessionCleanupDialog(self.manager.workspace, self).exec()
 
     def _refresh(self) -> None:
         if self.manager.url:
