@@ -51,6 +51,9 @@ class MainWindow(QMainWindow):
         # 内嵌浏览器
         self.web = QWebEngineView(self)
         self.setCentralWidget(self.web)
+        # 页面里 target="_blank" 的链接（比如对话里的 PDF/预览页链接）默认会被
+        # Qt 静默丢弃，因为我们没做内嵌多窗口/多标签；改成丢给系统默认浏览器打开。
+        self.web.page().newWindowRequested.connect(self._on_new_window_requested)
         self.web.setHtml(
             "<html><body style='background:#1e1e1e;color:#ccc;font-family:sans-serif;"
             "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>"
@@ -193,6 +196,9 @@ class MainWindow(QMainWindow):
     def _open_external(self) -> None:
         if self.manager.url:
             QDesktopServices.openUrl(QUrl(self.manager.url))
+
+    def _on_new_window_requested(self, request) -> None:
+        QDesktopServices.openUrl(request.requestedUrl())
 
     def _open_about(self) -> None:
         AboutDialog(self).exec()
