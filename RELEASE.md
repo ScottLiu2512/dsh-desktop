@@ -10,8 +10,8 @@
 | Python 3.10+ | 与运行时一致 |
 | PyInstaller | pip install -r requirements-dev.txt（含 pyinstaller） |
 | Inno Setup 6 | 默认安装路径 C:\Program Files (x86)\Inno Setup 6\ISCC.exe |
-| Git + GitHub 凭据 | 已配置凭据管理器（git config --get credential.helper 应为 manager） |
-| 发布用 token | 凭据管理器中的 GitHub token 需有 repo 权限（用于创建 Release / 上传资产） |
+| Git + GitHub 凭据 | 已配置凭据管理器（git config --get credential.helper 应为 manager），用于 git push |
+| GitHub CLI（gh） | gh auth status 显示已登录，token scope 含 repo（用于创建 Release / 上传资产） |
 
 > 版本号唯一权威来源：dsh_gui/__init__.py 的 __version__。
 > dsh_gui.spec 会正则提取它；generate_promo_images.py 也动态读取。无需手动改。
@@ -85,43 +85,59 @@ python -m PyInstaller dsh_gui.spec --noconfirm --clean
 
 ## 四、创建 Release 并上传资产
 
-用 GitHub API（凭据管理器里的 token）：
+用 GitHub CLI（`gh`），**不要**用 `Invoke-RestMethod` 手拼 JSON 直接调 REST API。
+v1.0.2 就是这么发的：Windows PowerShell 5.1 对字符串请求体的默认编码不是 UTF-8，
+中文说明文字经过 `ConvertTo-Json` + `Invoke-RestMethod` 这一路会被吃成 `?`，
+发布后 release notes 全是乱码，还是不可逆的（覆盖前的原文已经丢了，只能重写）。
+`gh` 内部按 UTF-8 处理文件内容，不会有这个问题。
 
-```powershell
-# 取 token（不打印到日志）
-$credInput = "protocol=https" + [char]10 + "host=github.com" + [char]10 + [char]10
-$token = (($credInput | git credential fill) | Select-String '^password=').Line.Substring(9)
-$headers = @{ Authorization = "Bearer $token"; 'User-Agent' = 'dsh-desktop-release'; 'Accept' = 'application/vnd.github+json' }
+**发布说明必须先写成本地 UTF-8 文件，用 `--notes-file` 传入**——不要用
+`--notes "一大段中文"` 或者拼 PowerShell 字符串塞进去，那样文字还是会先经过一次
+控制台代码页转换，一样会乱码。
 
-# 1. 创建 Release（tag 需先推送成功）
-$body = @{
-  tag_name = 'vX.Y.Z'
-  name     = 'DSH Desktop vX.Y.Z'
-  body     = '<更新说明，建议包含 新增 / 修复 / 其他 三节>'
-  draft    = $false
-  prerelease = $false
-} | ConvertTo-Json
-$rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/ScottLiu2512/dsh-desktop/releases' -Method Post -Headers $headers -ContentType 'application/json' -Body $body
-# 记下 $rel.id
+```bash
+# 1. 用编辑器把更新说明写到一个 UTF-8 文件，例如 notes.md
+#    （新增 / 修复 / 其他 三节，格式参考历史 release：
+#     gh release view v1.0.2 --json body --jq '.body'）
 
-# 2. 上传资产（uploads.github.com，三个都要）
-$rid = $rel.id
-curl.exe -sS -X POST -H "Authorization: Bearer $token" -H "Content-Type: image/png" --data-binary '@release/screenshot.png' "https://uploads.github.com/repos/ScottLiu2512/dsh-desktop/releases/$rid/assets?name=screenshot.png"
-curl.exe -sS -X POST -H "Authorization: Bearer $token" -H "Content-Type: application/octet-stream" --data-binary '@installer_output/DSH-Desktop-Setup.exe' "https://uploads.github.com/repos/ScottLiu2512/dsh-desktop/releases/$rid/assets?name=DSH-Desktop-Setup.exe"
-curl.exe -sS -X POST -H "Authorization: Bearer $token" -H "Content-Type: application/octet-stream" --data-binary '@dist/DSH-Desktop.exe' "https://uploads.github.com/repos/ScottLiu2512/dsh-desktop/releases/$rid/assets?name=DSH-Desktop.exe"
+# 2. 创建 Release，一次性带上所有资产（tag 需先 push 成功）
+gh release create vX.Y.Z \
+  "dist/DSH-Desktop.exe" \
+  "installer_output/DSH-Desktop-Setup.exe" \
+  "release/screenshot.png" \
+  --title "DSH Desktop vX.Y.Z" \
+  --notes-file notes.md
 ```
 
-> 215MB 的大文件上传耗时数分钟，建议放后台任务；失败就重试（同名资产重复上传会 422，
-> 可先查 GET /releases/tags/vX.Y.Z 的 assets 列表，用 DELETE /releases/assets/{id} 删旧的）。
+215MB 的大文件上传耗时数分钟，属正常现象，耐心等即可。
+
+补充资产或者重新打包后要替换已上传的文件，用 `--clobber` 直接覆盖，不用先手动删旧的：
+
+```bash
+gh release upload vX.Y.Z "dist/DSH-Desktop.exe" --clobber
+```
+
+只改说明文字、不动资产：
+
+```bash
+gh release edit vX.Y.Z --notes-file notes.md
+```
+
+> `gh` 访问的是 api.github.com / uploads.github.com，如果遇到和「二、」里同样的
+> DNS 污染连不上，用同一套「探测 IP → 写 hosts → 操作 → 恢复」的办法，
+> 只是把 hosts 里的域名换成 api.github.com 或 uploads.github.com。
 
 ## 五、验证
 
-```powershell
-# 1. Release 与资产齐全（screenshot.png / Setup.exe / exe 三个都 state=uploaded）
-$rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/ScottLiu2512/dsh-desktop/releases/tags/vX.Y.Z' -Headers $headers
-$rel.assets | ForEach-Object { "$($_.name) $($_.size) state=$($_.state)" }
+```bash
+# 1. Release 与资产齐全（screenshot.png / Setup.exe / exe 三个都在）
+gh release view vX.Y.Z --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
 
-# 2. README 里的 latest 链接应返回 200（重定向到本版本资产）
+# 2. 发布说明确实是中文/UTF-8，不是乱码（本地落盘再看，避免终端本身编码问题）
+gh release view vX.Y.Z --json body --jq '.body' > notes_check.txt
+# 用 Read 工具或编辑器打开 notes_check.txt 核对
+
+# 3. README 里的 latest 链接应返回 200（重定向到本版本资产）
 curl.exe -sS -L -o NUL -w "%{http_code}" "https://github.com/ScottLiu2512/dsh-desktop/releases/latest/download/screenshot.png"
 ```
 
@@ -140,12 +156,17 @@ A：网络窗口可能极短。用「探测 IP → 写 hosts → push → 恢复
 10-20 分钟；或换时段再试。SSH（ssh.github.com:443）通常可达，但需要
 admin:public_key 权限的 token 注册公钥——发布用 OAuth token 一般没有该 scope。
 
-**Q：上传资产 422？**
-A：同名资产已存在。先 GET .../releases/tags/vX.Y.Z 查看 assets，用
-DELETE /releases/assets/{id} 删除旧的再传。
+**Q：gh release create 报资产已存在 / 上传失败要重传？**
+A：用 `gh release upload vX.Y.Z <文件> --clobber` 直接覆盖，不用手动删旧资产。
+
+**Q：release notes 里的中文变成了 `?`？**
+A：说明又是从某个 PowerShell 字符串/heredoc 直接传给 `--notes` 或 API 的。
+必须先存成 UTF-8 文件，用 `--notes-file` 传（见「四、」）。已经发出去的乱码
+文本没法恢复原文，只能照实重写一份再用 `gh release edit vX.Y.Z --notes-file`
+覆盖。
 
 **Q：创建 Release 时 tag 不存在？**
-A：必须先把 tag 推送成功（git push origin vX.Y.Z），再调 API 创建。
+A：必须先把 tag 推送成功（git push origin vX.Y.Z），再用 gh release create 创建。
 
 **Q：hosts 写入失败（文件被占用）？**
 A：安全软件（如 AlibabaProtect）会锁 hosts。用
