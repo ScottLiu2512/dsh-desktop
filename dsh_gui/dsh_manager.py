@@ -27,11 +27,22 @@ def coerce_port(value, default: int = DEFAULT_PORT) -> int:
     return port if 1024 <= port <= 65535 else default
 
 
+_find_dsh_cache = None
+
+
 def find_dsh():
-    """在 PATH 与常见 npm 全局目录中查找 dsh 可执行文件；找不到返回 None。"""
+    """在 PATH 与常见 npm 全局目录中查找 dsh 可执行文件；找不到返回 None。
+
+    找到的结果会被缓存，避免每次启动都遍历 PATH（PATH 较长时可能卡顿
+    主线程）；找不到则每次重查，便于用户装好 dsh 后无需重启应用即可生效。
+    """
+    global _find_dsh_cache
+    if _find_dsh_cache:
+        return _find_dsh_cache
     for name in ("dsh.cmd", "dsh", "dsh.exe"):
         found = shutil.which(name)
         if found:
+            _find_dsh_cache = found
             return found
     appdata = os.environ.get("APPDATA")
     if appdata:
@@ -39,6 +50,7 @@ def find_dsh():
         for name in ("dsh.cmd", "dsh.ps1", "dsh"):
             candidate = npm_dir / name
             if candidate.exists():
+                _find_dsh_cache = str(candidate)
                 return str(candidate)
     return None
 
@@ -155,8 +167,13 @@ class DshManager(QObject):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                # 防止 taskkill 卡住时主线程无限等待导致窗口「未响应」；
+                # 超时后走下面的兜底直接 kill 主进程。
+                timeout=5,
             )
             killed = result.returncode == 0
+        except subprocess.TimeoutExpired:
+            self.log_line.emit("[停止] taskkill 超时，改为直接结束主进程。")
         except Exception as exc:  # noqa: BLE001
             self.log_line.emit(f"[停止] taskkill 无法执行：{exc}")
         # 进程仍活着才需要兜底，避免它已自行退出时打出多余的提示。
