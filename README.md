@@ -4,7 +4,7 @@ DeepSeek Harness（DSH）桌面客户端（Windows）。把 DSH 的 Web 界面�
 
 > 说明：本应用是 DeepSeek Harness 的**客户端外壳**，不包含 Harness 本体，运行前需要先安装 Node.js 和 `dsh`。
 >
-> 当前版本：v1.0.6 ｜ [Releases](https://github.com/ScottLiu2512/dsh-desktop/releases)
+> 当前版本：v1.0.7 ｜ [Releases](https://github.com/ScottLiu2512/dsh-desktop/releases)
 
 ## 功能特性
 
