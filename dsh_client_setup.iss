@@ -3,7 +3,7 @@
 ; 产物：installer_output\DSH-Desktop-Setup.exe
 
 #define MyAppName "DSH Desktop"
-#define MyAppVersion "1.0.8"
+#define MyAppVersion "1.0.9"
 #define MyAppPublisher "dsh-gui"
 #define MyAppExeName "DSH-Desktop.exe"
 
@@ -17,8 +17,9 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=installer_output
 OutputBaseFilename=DSH-Desktop-Setup
-; 单文件 exe 内部已压缩，用 zip 更快；如需更小体积可改 lzma2
-Compression=zip
+; 装的是 onedir 目录版（近 3000 个未压缩文件），lzma2 能把安装包压得小得多；
+; 换来的编译耗时对「打一次包」来说完全可以接受。
+Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -34,7 +35,10 @@ Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.i
 Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescription: "附加任务:"
 
 [Files]
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; onedir 产物：主 exe 与 _internal\ 下的全部依赖一起装进安装目录。
+; 相比以前装单文件版，依赖不再每次启动都往 %TEMP% 解压一遍。
+Source: "dist\DSH-Desktop\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\DSH-Desktop\*"; DestDir: "{app}"; Excludes: "{#MyAppExeName}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

@@ -1,9 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
-# 单文件（onefile）+ 无控制台（windowed）打包配置 —— 免安装单文件版。
-# 用法：python -m PyInstaller dsh_gui.spec
-# 产物：dist\DSH-Desktop.exe
+# 目录（onedir）+ 无控制台（windowed）打包配置 —— 安装包用。
+# 用法：python -m PyInstaller dsh_gui_onedir.spec
+# 产物：dist\DSH-Desktop\（DSH-Desktop.exe + _internal\）
 #
-# 安装包用的是目录版（dsh_gui_onedir.spec），两者的取舍见 build_common.py。
+# 相对 onefile 的好处：依赖文件永久留在安装目录，不再每次启动都往 %TEMP%
+# 解压近 3000 个文件（省下好几秒启动时间、不再被安全软件反复全量扫描、
+# 也不会因异常退出而堆积残留目录）。取舍详见 build_common.py。
 
 import sys
 
@@ -28,12 +30,11 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+# exclude_binaries=True：二进制依赖不塞进 exe，交给下面的 COLLECT 摊到目录里。
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
-    [],
+    exclude_binaries=True,
     name=build_common.APP_NAME,
     icon=build_common.ICON,
     version=version_info,
@@ -41,12 +42,20 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name=build_common.APP_NAME,
 )
