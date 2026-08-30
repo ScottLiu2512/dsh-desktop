@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -22,6 +23,13 @@ SRC_SHOT = ROOT / "release" / "screenshot.png"
 PROMO_DIR = ROOT / "promo"
 OUT_COVER = PROMO_DIR / "cover.png"
 OUT_FLOW = PROMO_DIR / "flow-compare.png"
+
+
+def _read_version() -> str:
+    """从 dsh_gui/__init__.py 读取版本号，避免在多处手动同步。"""
+    init_file = ROOT / "dsh_gui" / "__init__.py"
+    match = re.search(r'__version__\s*=\s*"([^"]+)"', init_file.read_text(encoding="utf-8"))
+    return match.group(1) if match else "unknown"
 
 # ---- 字体路径（Windows 系统自带）----
 FONT_BLACK = "C:/Windows/Fonts/seguibl.ttf"       # Segoe UI Black，英文标题
@@ -155,7 +163,7 @@ def make_cover() -> None:
     tag_x, tag_y = 60, H - 80
     draw_rounded_rect(draw, (tag_x, tag_y, tag_x + 220, tag_y + 44), 22,
                       fill=hex_to_rgb("#4D6BFE") + (255,))
-    draw.text((tag_x + 20, tag_y + 8), "v1.0.0  ·  Windows", font=f_tag, fill=(255, 255, 255, 255))
+    draw.text((tag_x + 20, tag_y + 8), f"v{_read_version()}  ·  Windows", font=f_tag, fill=(255, 255, 255, 255))
 
     PROMO_DIR.mkdir(parents=True, exist_ok=True)
     bg.convert("RGB").save(OUT_COVER, "PNG")
