@@ -4,7 +4,7 @@ DeepSeek Harness（DSH）桌面客户端（Windows）。把 DSH 的 Web 界面�
 
 > 说明：本应用是 DeepSeek Harness 的**客户端外壳**，不包含 Harness 本体，运行前需要先安装 Node.js 和 `dsh`。
 >
-> 当前版本：v1.0.4 ｜ [Releases](https://github.com/ScottLiu2512/dsh-desktop/releases)
+> 当前版本：v1.0.5 ｜ [Releases](https://github.com/ScottLiu2512/dsh-desktop/releases)
 
 ## 功能特性
 
@@ -12,6 +12,7 @@ DeepSeek Harness（DSH）桌面客户端（Windows）。把 DSH 的 Web 界面�
 - **内嵌浏览器**：直接使用 DSH 自带的完整 Web UI（多会话、历史记录、流式输出、工具调用与审批等）
 - **图形化配置**：API Key、模型、推理强度、工作区目录、端口，无需手改配置文件
 - **日志面板 + 状态栏**：实时查看 dsh 进程输出，便于排查问题
+- **会话清理**：按当前工作区列出 dsh 的历史会话（大小、创建时间、是否有真实对话内容），可一键选中所有空会话并删除
 
 ## 界面预览
 
@@ -44,7 +45,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-依赖：Python 3.10+、PySide6、PyYAML（见 `requirements.txt`）。
+依赖：Python 3.10+、PySide6、PyYAML、zstandard（见 `requirements.txt`）。
 
 ## 使用
 
