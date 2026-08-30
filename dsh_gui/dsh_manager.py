@@ -31,23 +31,20 @@ def coerce_port(value, default: int = DEFAULT_PORT) -> int:
 
 
 def _hidden_window_kwargs() -> dict:
-    """构造隐藏控制台窗口所需的 Popen 参数。
+    """构造避免弹出控制台窗口所需的 Popen 参数。
 
-    单独的 CREATE_NO_WINDOW 在启用了「Windows 终端」作为默认终端的系统上并不
-    可靠——控制台的转接（handoff）机制会绕过这个标志，仍然弹出一个可见的
-    终端窗口（Windows 11 的已知行为）。额外带上 STARTUPINFO + SW_HIDE 双重
-    保险，两者互不冲突，其中任意一个生效都能压住窗口。
+    CREATE_NO_WINDOW 只是「分配控制台、但隐藏窗口」——实测这个隐藏的控制台
+    会话本身仍可能被 Windows 的默认终端转接机制接管，重新变成一个可见窗口
+    （偶发，不是每次都触发，怀疑是转接逻辑本身的时序竞争）。DETACHED_PROCESS
+    彻底不分配控制台，没有会话可供转接。子进程的 stdin/stdout/stderr 都已经
+    显式走管道重定向，不依赖真实控制台，所以没有副作用。
     """
-    if not hasattr(subprocess, "STARTUPINFO"):
+    if not hasattr(subprocess, "DETACHED_PROCESS"):
         return {}
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = subprocess.SW_HIDE
     creationflags = (
-        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | subprocess.DETACHED_PROCESS
     )
-    return {"startupinfo": startupinfo, "creationflags": creationflags}
+    return {"creationflags": creationflags}
 
 
 _find_dsh_cache = None
