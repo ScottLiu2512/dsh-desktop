@@ -35,6 +35,12 @@ DEFAULT_PROVIDER = "deepseek-official"
 DEFAULT_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"]
 REASONING_EFFORTS = ["high", "max", "off"]
 
+# dsh ≥0.1.6 的 dsh-credentials-local 严格校验 .credentials.yaml 的顶层键：
+# 只允许 version / refs / records，出现别的就抛
+# `unknown top-level key "X"`，整个 dsh 起不来。
+CRED_VERSION = 1
+_SECTION_KEYS = ("version", "refs", "records")
+
 
 def _read_yaml(path: Path) -> dict:
     if not path.exists():
@@ -59,21 +65,67 @@ def _write_yaml(path: Path, data: dict) -> None:
         )
 
 
+def credentials_layout(data: dict) -> str:
+    """判断凭据文件用的是 dsh 新版分段布局还是旧版扁平布局。"""
+    if not isinstance(data, dict):
+        return "sectioned"
+    if any(key in data for key in _SECTION_KEYS):
+        return "sectioned"
+    return "flat"
+
+
+def _credential_refs(data: dict) -> dict:
+    """取出存放具名凭据的 refs 段，两种布局都能读。"""
+    if not isinstance(data, dict):
+        return {}
+    if credentials_layout(data) == "sectioned":
+        refs = data.get("refs")
+        return dict(refs) if isinstance(refs, dict) else {}
+    return {k: v for k, v in data.items() if isinstance(v, str)}
+
+
 def get_api_key() -> str:
     """读取 DeepSeek API Key（可能为空字符串）。"""
-    return str(_read_yaml(credentials_file()).get("DEEPSEEK_API_KEY", "") or "")
+    data = _read_yaml(credentials_file())
+    return str(_credential_refs(data).get("DEEPSEEK_API_KEY", "") or "")
 
 
 def set_api_key(key: str) -> None:
-    """写入 DeepSeek API Key；传入空字符串表示删除。"""
+    """写入 DeepSeek API Key；传入空字符串表示删除。
+
+    **不要把 API Key 写到顶层。** dsh ≥0.1.6 只接受 ``version`` / ``refs`` /
+    ``records`` 三个顶层键，早先的实现在顶层塞一个 ``DEEPSEEK_API_KEY``，会让
+    dsh 报 ``unknown top-level key`` 并彻底起不来；而且 ``get_api_key()`` 也读不到
+    dsh 迁移后的值，用户会以为 Key 丢了、再保存一次，反复写坏。
+    这里按新版结构写，并顺手丢弃历史遗留的非法顶层键。
+    """
     path = credentials_file()
     data = _read_yaml(path)
     key = (key or "").strip()
+
+    if credentials_layout(data) == "flat":
+        # 旧版 dsh 用的是扁平布局，别把新版结构强塞给它。
+        if key:
+            data["DEEPSEEK_API_KEY"] = key
+        else:
+            data.pop("DEEPSEEK_API_KEY", None)
+        _write_yaml(path, data)
+        return
+
+    refs = _credential_refs(data)
     if key:
-        data["DEEPSEEK_API_KEY"] = key
+        refs["DEEPSEEK_API_KEY"] = key
     else:
-        data.pop("DEEPSEEK_API_KEY", None)
-    _write_yaml(path, data)
+        refs.pop("DEEPSEEK_API_KEY", None)
+
+    rebuilt: dict = {
+        "version": data.get("version") or CRED_VERSION,
+        "refs": refs,
+    }
+    records = data.get("records")
+    if isinstance(records, dict) and records:
+        rebuilt["records"] = records
+    _write_yaml(path, rebuilt)
 
 
 def get_default_model_config() -> dict:

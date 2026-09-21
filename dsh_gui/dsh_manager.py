@@ -12,7 +12,14 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 # 匹配 dsh web 启动后打印的访问地址（http/https + 本机地址 + 可选端口）。
-_URL_RE = re.compile(r"https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?", re.IGNORECASE)
+# ⚠️ 路径和查询串必须一起取：dsh 0.1.6 起打印的地址带一次性访问令牌，
+#    形如 http://127.0.0.1:3080/?token=xxx。只取到主机端口的话，内嵌浏览器
+#    会落到「authentication required; reopen the URL printed by dsh web」页。
+#    用 [^\s\"'()<>] 排除空白与括号，避免把后面 "(LAN: …)" 之类的括注吃进来。
+_URL_RE = re.compile(
+    r"https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:/[^\s\"'()<>]*)?",
+    re.IGNORECASE,
+)
 # 去掉终端 ANSI 颜色码，便于在日志面板里阅读。
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # npm 在 Windows 上生成的 .cmd shim 里，真正的入口永远是形如

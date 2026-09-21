@@ -4,7 +4,7 @@ DeepSeek Harness（DSH）桌面客户端（Windows）。把 DSH 的 Web 界面�
 
 > 说明：本应用是 DeepSeek Harness 的**客户端外壳**，不包含 Harness 本体，运行前需要先安装 Node.js 和 `dsh`。
 >
-> 当前版本：v1.0.9 ｜ [Releases](https://github.com/ScottLiu2512/dsh-desktop/releases)
+> 当前版本：v1.1.1 ｜ [Releases](https://github.com/ScottLiu2512/dsh-desktop/releases)
 
 ## 功能特性
 
@@ -13,6 +13,9 @@ DeepSeek Harness（DSH）桌面客户端（Windows）。把 DSH 的 Web 界面�
 - **图形化配置**：API Key、模型、推理强度、工作区目录、端口，无需手改配置文件
 - **日志面板 + 状态栏**：实时查看 dsh 进程输出，便于排查问题
 - **会话清理**：按当前工作区列出 dsh 的历史会话（大小、创建时间、是否有真实对话内容），可一键选中所有空会话并删除
+- **环境管家**：维护面板把 dsh 的日常运维收进界面——环境概览（可一键复制用于反馈问题）、命令描述汉化一键打/还原、插件状态诊断与修复、dsh 本体升级、升级残留清理
+  - 升级 dsh 时**自动绕开 npm 的 `latest` 降级陷阱**：`latest` 标签有时比已装版本还旧（例如 latest 指向 `0.1.5-rc.2`，实际最新是 `0.1.6-alpha.2`），直接 `npm install` 会降级。这里按语义化版本号取真正最新的那个，并显式带上版本号安装
+  - 升级前自动停止 dsh，避免旧版原生模块被占用而产生清理不掉的残留目录
 
 ## 界面预览
 
@@ -48,6 +51,8 @@ python main.py
 ```
 
 依赖：Python 3.10+、PySide6、PyYAML、zstandard（见 `requirements.txt`）。
+
+> 若启动时报 `No module named 'PySide6.QtWebEngineWidgets'`，说明 PySide6 只装到了基础部分——6.x 起 QtWebEngine 被拆到了单独的 Addons 包，补一句 `pip install PySide6-Addons` 即可。
 
 ## 使用
 

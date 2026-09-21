@@ -3,7 +3,7 @@
 ; 产物：installer_output\DSH-Desktop-Setup.exe
 
 #define MyAppName "DSH Desktop"
-#define MyAppVersion "1.0.9"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "dsh-gui"
 #define MyAppExeName "DSH-Desktop.exe"
 

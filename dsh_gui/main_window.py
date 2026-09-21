@@ -18,9 +18,11 @@ from . import __version__
 from .about_dialog import AboutDialog
 from .config_dialog import ConfigDialog
 from .dsh_manager import DEFAULT_PORT, DshManager
+from .maintenance_dialog import MaintenanceDialog
 from .session_cleanup_dialog import SessionCleanupDialog
 from .update_dialog import UpdateDialog
 from .updater import VersionCheck, version_gt
+from .upgrade_worker import DshVersionCheck
 
 
 class _ClickableLabel(QLabel):
@@ -92,6 +94,12 @@ class MainWindow(QMainWindow):
         self._update_checker.failed.connect(self._on_update_check_failed)
         QTimer.singleShot(3000, self._check_updates)
 
+        # dsh 本体的版本检查错峰做（晚 6 秒），免得两个请求同时打出去。
+        # 失败静默——这是锦上添花的信息，不值得弹窗打扰。
+        self._dsh_checker = DshVersionCheck(self)
+        self._dsh_checker.finished.connect(self._on_dsh_check)
+        QTimer.singleShot(6000, self._dsh_checker.check)
+
         self._restore_geometry()
 
     # ---- UI 构建 ----
@@ -133,6 +141,10 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
+        self.maintenance_action = QAction("维护", self)
+        self.maintenance_action.triggered.connect(self._open_maintenance)
+        toolbar.addAction(self.maintenance_action)
+
         self.session_cleanup_action = QAction("会话清理", self)
         self.session_cleanup_action.triggered.connect(self._open_session_cleanup)
         toolbar.addAction(self.session_cleanup_action)
@@ -161,6 +173,18 @@ class MainWindow(QMainWindow):
         self.update_label.clicked.connect(self._open_update_dialog)
         self.statusBar().addPermanentWidget(self.update_label)
 
+        # dsh 本体有新版本时的提示。特意和上面那个分开：Desktop 自己的升级走
+        # update_dialog（下载安装包覆盖安装），dsh 的升级在维护面板里做，
+        # 两者动作完全不同，混用一个入口会让用户搞不清点下去会发生什么。
+        self.dsh_update_label = _ClickableLabel("")
+        self.dsh_update_label.setStyleSheet(
+            "color:#2a6fd4; text-decoration:underline; padding:0 8px;"
+        )
+        self.dsh_update_label.setCursor(Qt.PointingHandCursor)
+        self.dsh_update_label.hide()
+        self.dsh_update_label.clicked.connect(self._open_maintenance)
+        self.statusBar().addPermanentWidget(self.dsh_update_label)
+
     # ---- 动作 ----
     def _start(self) -> None:
         self._set_status("正在启动 dsh…")
@@ -183,6 +207,10 @@ class MainWindow(QMainWindow):
             self.manager.set_workspace(dialog.workspace())
             self.manager.set_port(dialog.port())
             self._append_log("> 配置已保存（重启 dsh 后生效）")
+
+    def _open_maintenance(self) -> None:
+        """打开维护面板：概览 / 汉化 / 插件 / 升级 / 清理。"""
+        MaintenanceDialog(self).exec()
 
     def _open_session_cleanup(self) -> None:
         SessionCleanupDialog(self.manager.workspace, self).exec()
@@ -268,6 +296,24 @@ class MainWindow(QMainWindow):
         if self._manual_check:
             QMessageBox.warning(self, "检查更新", f"检查更新失败：{msg}")
             self._set_status("已停止")
+
+    def _on_dsh_check(self, info) -> None:
+        """dsh 本体有新版就在状态栏提示，点一下进维护面板处理。
+
+        这个提示补的是个真实的盲区：Desktop 的「检查更新」只管它自己，
+        dsh 装的是什么版本、该不该升，用户原本无从得知——而 dsh 在 npm 上的
+        latest 标签还可能比已装的更旧，自己动手升反而会降级。
+        """
+        if not info.get("has_update"):
+            return
+        latest = info.get("latest")
+        current = info.get("current")
+        self.dsh_update_label.setText(f"dsh 可升级到 {latest}")
+        self.dsh_update_label.show()
+        self._append_log(
+            f"> 检测到 dsh 新版本 {latest}（当前 {current}）。"
+            "点状态栏提示，或打开「维护」→「升级」处理。"
+        )
 
     def _open_update_dialog(self) -> None:
         if not self._last_update_info:
