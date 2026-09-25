@@ -52,8 +52,12 @@ class ConfigDialog(QDialog):
         self.effort_combo = QComboBox()
         self.effort_combo.addItems(config_store.REASONING_EFFORTS)
         current_effort = cfg.get("reasoningEffort", "high")
-        if current_effort in config_store.REASONING_EFFORTS:
-            self.effort_combo.setCurrentText(current_effort)
+        # 与上面模型的处理保持一致：settings.yaml 里存了下拉框之外的值时也要
+        # 加进列表，否则 setCurrentText 静默失败、界面停在 "high"，用户一点保存
+        # 就把真实配置覆盖成了 high。
+        if current_effort not in config_store.REASONING_EFFORTS:
+            self.effort_combo.addItem(current_effort)
+        self.effort_combo.setCurrentText(current_effort)
 
         # 工作区目录
         self.workspace_edit = QLineEdit(str(settings.value("workspace", str(Path.home()))))

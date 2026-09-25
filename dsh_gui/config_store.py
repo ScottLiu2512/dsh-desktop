@@ -69,6 +69,13 @@ def credentials_layout(data: dict) -> str:
     """判断凭据文件用的是 dsh 新版分段布局还是旧版扁平布局。"""
     if not isinstance(data, dict):
         return "sectioned"
+    # 空 dict（文件不存在，或存在但内容为空）也算新版布局。旧代码会把它判成
+    # flat、进而写出一个顶层 DEEPSEEK_API_KEY —— 那正是 dsh ≥0.1.6 会因为
+    # unknown top-level key 拒绝启动的写法。文件还没有历史包袱时，按新版结构写
+    # 是唯一安全的选择：扁平结构只会害到新版 dsh，分段结构顶多是在老 dsh 上
+    # 看起来"多套了一层"，而本工具面向的就是 dsh 0.1.6+。
+    if not data:
+        return "sectioned"
     if any(key in data for key in _SECTION_KEYS):
         return "sectioned"
     return "flat"
@@ -98,6 +105,7 @@ def set_api_key(key: str) -> None:
     dsh 报 ``unknown top-level key`` 并彻底起不来；而且 ``get_api_key()`` 也读不到
     dsh 迁移后的值，用户会以为 Key 丢了、再保存一次，反复写坏。
     这里按新版结构写，并顺手丢弃历史遗留的非法顶层键。
+    首次保存（文件本身不存在）同样直接写成分段结构，避免先落一份扁平文件再改。
     """
     path = credentials_file()
     data = _read_yaml(path)
