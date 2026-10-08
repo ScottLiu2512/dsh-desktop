@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
+from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QDockWidget,
@@ -36,6 +37,35 @@ class _ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+# featurePermissionRequested 收到的 Feature 枚举对应的中文名。各 Qt 版本新增的
+# 枚举项并不一致（DesktopVideoCapture / LocalFontsAccess 是较新版本才有的），
+# 所以逐个用 getattr 探测，取不到就退化成枚举自身的名字，不让窗口构造失败。
+_PERMISSION_LABELS = (
+    ("MediaAudioCapture", "麦克风"),
+    ("MediaVideoCapture", "摄像头"),
+    ("MediaAudioVideoCapture", "麦克风与摄像头"),
+    ("DesktopVideoCapture", "屏幕画面共享"),
+    ("DesktopAudioVideoCapture", "屏幕与系统声音共享"),
+    ("Geolocation", "地理位置"),
+    ("Notifications", "桌面通知"),
+    ("MouseLock", "鼠标锁定"),
+    ("ClipboardReadWrite", "剪贴板读写"),
+    ("LocalFontsAccess", "本地字体"),
+)
+
+# 允许申请媒体权限的来源：只有本机 dsh 服务。对话里的网页预览等外链一律拒绝。
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _permission_label(feature) -> str:
+    """把 QWebEnginePage.Feature 翻译成中文名。"""
+    for name, label in _PERMISSION_LABELS:
+        value = getattr(QWebEnginePage.Feature, name, None)
+        if value is not None and feature == value:
+            return label
+    return f"未知权限（{feature}）"
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -56,6 +86,14 @@ class MainWindow(QMainWindow):
         # 页面里 target="_blank" 的链接（比如对话里的 PDF/预览页链接）默认会被
         # Qt 静默丢弃，因为我们没做内嵌多窗口/多标签；改成丢给系统默认浏览器打开。
         self.web.page().newWindowRequested.connect(self._on_new_window_requested)
+        # 媒体权限：QtWebEngine 默认**一律拒绝**麦克风/摄像头等请求，而且不给任何
+        # 提示。缺了这段，dsh 页面里的语音输入调 getUserMedia 会被直接拒掉，页面
+        # 只会一直显示「请允许使用麦克风…」，用户翻遍界面也找不到可以点「允许」的
+        # 地方。已经授予过的权限记在这里，本次运行不再重复询问。
+        self._granted_permissions: set = set()
+        self.web.page().featurePermissionRequested.connect(
+            self._on_feature_permission_requested
+        )
         self.web.setHtml(
             "<html><body style='background:#1e1e1e;color:#ccc;font-family:sans-serif;"
             "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>"
@@ -227,6 +265,49 @@ class MainWindow(QMainWindow):
 
     def _on_new_window_requested(self, request) -> None:
         QDesktopServices.openUrl(request.requestedUrl())
+
+    def _on_feature_permission_requested(self, security_origin: QUrl, feature) -> None:
+        """处理 dsh 页面的麦克风/摄像头等权限请求。
+
+        必须对**每一个**请求都显式调用 setFeaturePermission，因为 QtWebEngine 的
+        默认策略是拒绝；漏掉就等同于永久拒绝。这里只对本机 dsh 服务弹窗询问，
+        对话里嵌的外部网页（预览页等）一律拒绝，不给媒体权限。
+        """
+        page = self.web.page()
+        policy = QWebEnginePage.PermissionPolicy
+        host = security_origin.host()
+        label = _permission_label(feature)
+
+        if host not in _LOCAL_HOSTS:
+            page.setFeaturePermission(
+                security_origin, feature, policy.PermissionDeniedByUser
+            )
+            return
+
+        key = (security_origin.toString(), str(feature))
+        if key in self._granted_permissions:
+            page.setFeaturePermission(
+                security_origin, feature, policy.PermissionGrantedByUser
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "DSH Desktop 权限请求",
+            f"dsh 页面（{host}）请求使用「{label}」。\n\n是否允许？\n"
+            "允许后本次运行期间不再重复询问。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        granted = answer == QMessageBox.Yes
+        if granted:
+            self._granted_permissions.add(key)
+        page.setFeaturePermission(
+            security_origin,
+            feature,
+            policy.PermissionGrantedByUser if granted else policy.PermissionDeniedByUser,
+        )
+        self._append_log(f"> dsh 请求「{label}」→ {'已允许' if granted else '已拒绝'}")
 
     def _open_about(self) -> None:
         AboutDialog(self).exec()
