@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
 
         self.manager = DshManager(self)
         self._eperm_hinted = False
+        self._lock_hinted = False
         # 两个 setter 自己会做容错，注册表里存了脏值也不会让窗口构造失败。
         self.manager.set_workspace(self._settings.value("workspace", str(Path.home())))
         self.manager.set_port(self._settings.value("port", DEFAULT_PORT))
@@ -227,6 +228,7 @@ class MainWindow(QMainWindow):
     def _start(self) -> None:
         self._set_status("正在启动 dsh…")
         self._eperm_hinted = False
+        self._lock_hinted = False
         self._append_log(f"> 启动 dsh web（工作区 {self.manager.workspace}）")
         if not self.manager.start():
             self._set_status("启动失败，请查看日志")
@@ -323,6 +325,7 @@ class MainWindow(QMainWindow):
     def _on_log(self, line: str) -> None:
         self._append_log(line)
         self._check_permission_hint(line)
+        self._check_lock_hint(line)
 
     def _check_permission_hint(self, line: str) -> None:
         low = line.lower()
@@ -336,6 +339,29 @@ class MainWindow(QMainWindow):
                 "请直接双击运行 exe，或在沙箱设置中放行 %USERPROFILE%\\.dsh 目录。"
             )
 
+    def _check_lock_hint(self, line: str) -> None:
+        """识别「凭据写锁超时」这种启动失败，给出一条能照着做的处置说明。
+
+        dsh 的日志只写到「timed out waiting for the writer lock」，用户很难
+        从中看出该怎么办，所以这里补一句中文提示。
+        """
+        if self._lock_hinted:
+            return
+        if "timed out waiting for the writer lock" not in line:
+            return
+        self._lock_hinted = True
+        self._append_log(
+            "[提示] dsh 卡在凭据文件的写锁上（.credentials.yaml.lock）。"
+            "多半是上一次 dsh 被强制结束后留下的陈旧锁：dsh 自己有接管机制，"
+            "但接管要先拿到一个以「那把旧锁里记的进程号」命名的标记文件，"
+            "标记文件一旦残留（抢占管道的进程也被强杀时就会发生），"
+            "接管就会一直失败，这把锁再也清不掉。"
+            "处理办法：先确认 DSH Desktop 与所有 node 进程都已退出，"
+            "然后把 %USERPROFILE%\\.dsh 下的 .credentials.yaml.lock 以及同名的 "
+            ".takeover-* 文件删掉，再点「启动」即可。"
+            "注意不要删 .credentials.yaml 本身，那是保存凭据的文件。"
+        )
+
     def _on_stopped(self, code: int) -> None:
         self._url_timer.stop()
         self._set_status("已停止" if code == 0 else f"已停止（退出码 {code}）")
@@ -347,7 +373,12 @@ class MainWindow(QMainWindow):
     def _on_url_timeout(self) -> None:
         if self.manager.is_running and self.manager.url is None:
             url = f"http://127.0.0.1:{self.manager.port}"
-            self._append_log(f"> 未解析到地址，回退到 {url}")
+            self._append_log(
+                f"> 20 秒内没等到服务地址，先按 {url} 打开。"
+                "注意 dsh 的访问令牌只在启动时随地址打印一次，这里拿不到令牌；"
+                "如果页面提示需要认证，说明浏览器里也没有可用的登录态，"
+                "点「停止」再「启动」重来一次即可。"
+            )
             self.web.load(QUrl(url))
             self.open_action.setEnabled(True)
             self._set_status(f"运行中：{url}")

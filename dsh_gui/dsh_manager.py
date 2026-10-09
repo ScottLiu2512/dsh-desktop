@@ -1,12 +1,13 @@
 """管理 ``dsh web`` 子进程：启动、停止、日志与访问地址解析。"""
 
+import ctypes
 import os
 import re
 import shutil
 import subprocess
 import threading
-import urllib.error
-import urllib.request
+import time
+from ctypes import wintypes
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -28,12 +29,6 @@ _NPM_SHIM_ENTRY_RE = re.compile(r'"%dp0%\\([^"]+\.js)"')
 
 DEFAULT_PORT = 3080
 INSTALL_HINT = "请先安装 Node.js 22 或更高版本，然后执行：npm install -g @deepseek-ai/dsh"
-# 只探测本机 loopback，能连上通常几十毫秒内就有结果；但端口真的空着时，
-# 有些安全软件会直接丢包不回 RST，导致连接尝试要等到超时才罢休——实测在
-# 有安全软件拦截的机器上能到 0.8 秒。这个值不能设太长，否则「全新启动、
-# 端口本来就没人占」这个最常见的场景每次都会被平白拖慢；也不能太短，
-# 否则可能把「正在应答、只是慢了一点」误判成没有服务。
-_PROBE_TIMEOUT = 0.3
 
 
 def coerce_port(value, default: int = DEFAULT_PORT) -> int:
@@ -122,6 +117,101 @@ def _resolve_npm_shim(shim_path: str):
     return [str(node_exe), str(entry)]
 
 
+# ---- 定位「占着端口的那个进程」----
+# 用来在启动前回收被孤儿 dsh 占住的端口。用 iphlpapi 的 GetExtendedTcpTable
+# 而不是解析 netstat：后者要起子进程、输出还受系统语言影响，而这里只要一张表。
+_AF_INET = 2
+_TCP_TABLE_OWNER_PID_LISTENER = 3
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+class _MIB_TCPROW_OWNER_PID(ctypes.Structure):
+    _fields_ = [
+        ("dwState", wintypes.DWORD),
+        ("dwLocalAddr", wintypes.DWORD),
+        ("dwLocalPort", wintypes.DWORD),
+        ("dwRemoteAddr", wintypes.DWORD),
+        ("dwRemotePort", wintypes.DWORD),
+        ("dwOwningPid", wintypes.DWORD),
+    ]
+
+
+def _listener_pids(port: int) -> set:
+    """返回所有在 IPv4 上监听该端口的进程 PID；查询失败返回空集合。"""
+    try:
+        iphlpapi = ctypes.WinDLL("iphlpapi")
+    except (OSError, AttributeError):
+        # WinDLL 在非 Windows 平台上是 AttributeError，不是 OSError——这个
+        # 模块整体是 Windows 专用，但保底不炸比区分异常类型重要。
+        return set()
+    iphlpapi.GetExtendedTcpTable.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.BOOL,
+        wintypes.ULONG,
+        ctypes.c_int,
+        wintypes.ULONG,
+    ]
+    iphlpapi.GetExtendedTcpTable.restype = wintypes.DWORD
+
+    size = wintypes.DWORD(0)
+    # 第一次只问需要多大缓冲；返回 ERROR_INSUFFICIENT_BUFFER 是预期行为。
+    iphlpapi.GetExtendedTcpTable(
+        None, ctypes.byref(size), False, _AF_INET, _TCP_TABLE_OWNER_PID_LISTENER, 0
+    )
+    if size.value == 0:
+        return set()
+    buf = ctypes.create_string_buffer(size.value)
+    if iphlpapi.GetExtendedTcpTable(
+        buf, ctypes.byref(size), False, _AF_INET, _TCP_TABLE_OWNER_PID_LISTENER, 0
+    ) != 0:
+        return set()
+
+    count = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
+    rows = ctypes.cast(
+        ctypes.addressof(buf) + ctypes.sizeof(wintypes.DWORD),
+        ctypes.POINTER(_MIB_TCPROW_OWNER_PID),
+    )
+    pids = set()
+    for i in range(count):
+        raw = rows[i].dwLocalPort
+        # 结构里的端口是网络字节序，低 16 位才是真正的端口号
+        if (((raw & 0xFF) << 8) | ((raw >> 8) & 0xFF)) == port:
+            pids.add(int(rows[i].dwOwningPid))
+    return pids
+
+
+def _pid_image_name(pid: int):
+    """返回该 PID 的可执行文件名（小写 basename）；取不到返回 None。"""
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except (OSError, AttributeError):
+        return None
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    handle = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return None
+        return Path(buf.value).name.lower()
+    except OSError:
+        return None
+    finally:
+        k32.CloseHandle(handle)
+
+
 class DshManager(QObject):
     """负责启动/停止 dsh web 子进程，并把输出转发成 Qt 信号。"""
 
@@ -134,7 +224,6 @@ class DshManager(QObject):
         self._proc = None
         self._reader = None
         self._url = None
-        self._adopted = False  # True 表示接上的是别的进程起的 dsh，不是本类自己管的
         self._workspace = str(Path.home())
         self._port = DEFAULT_PORT
 
@@ -169,7 +258,7 @@ class DshManager(QObject):
     # ---- 状态 ----
     @property
     def is_running(self) -> bool:
-        return self._adopted or (self._proc is not None and self._proc.poll() is None)
+        return self._proc is not None and self._proc.poll() is None
 
     @property
     def url(self):
@@ -179,19 +268,6 @@ class DshManager(QObject):
     def start(self) -> bool:
         if self.is_running:
             return False
-        # 配置的端口上如果已经有能正常应答的服务（通常是之前一次启动留下的、
-        # 没被这个 DshManager 实例管理到的孤儿 dsh 进程——比如应用重开过一次），
-        # 直接接上用，不要再起一个新的去抢端口，那样只会撞 EADDRINUSE 白白
-        # 报一次「启动失败」，而端口上其实一直有个健康的实例在服务。
-        existing_url = self._probe_existing_server()
-        if existing_url is not None:
-            self._adopted = True
-            self._url = existing_url
-            self.log_line.emit(
-                f"[提示] 端口 {self._port} 上已经有 dsh 在正常服务（不是这次启动的），直接接上使用。"
-            )
-            self.started.emit(existing_url)
-            return True
         # 注意：找不到 dsh 时，走 shell=True 分支的 Popen 也能创建成功（真正
         # 失败的是里面的 cmd.exe），异常分支捕获不到，所以必须先自己查一遍，
         # 否则用户只会看到一句莫名其妙的「退出码 1」。
@@ -208,7 +284,41 @@ class DshManager(QObject):
             )
             return False
 
-        args = ["web"]
+        # 端口上如果还留着上一次启动的 dsh（应用重开过一次、或上次退出时没被
+        # 带走），必须先把它清掉，不能「接上使用」。
+        #
+        # 原因：dsh 的访问令牌只打印在启动它的那个进程的 stdout 里，是一次性的。
+        # 外部实例拿不到那张令牌，把 web 视图指过去只会落到
+        # 「dsh web authentication required; reopen the URL printed by dsh web」
+        # 这个页面上——看着像坏了，其实只是没令牌。之前这里图省事直接 adopt，
+        # 就是这个报错的来源。
+        #
+        # 位置放在确认 dsh 可用、工作区可写之后：只有真要启动时才该动别人的
+        # 进程，不能出现「回收完才发现 dsh 没装」这种平白误伤。
+        reclaimed, remaining = self._reclaim_orphan_server()
+        if reclaimed:
+            pids = "、".join(str(pid) for pid in reclaimed)
+            self.log_line.emit(
+                f"[提示] 端口 {self._port} 上有上次残留的 dsh 进程（PID {pids}），"
+                "已结束它以释放端口。访问令牌只在启动它的那个进程的输出里打印一次，"
+                "接上去只会看到一个要求重新打开地址的认证页，所以这里改为重启一个干净的实例。"
+            )
+        if remaining:
+            names = "、".join(
+                sorted({_pid_image_name(pid) or f"PID {pid}" for pid in remaining})
+            )
+            self.log_line.emit(
+                f"[提示] 端口 {self._port} 仍被占用（{names}）。本程序只回收能确认属于 "
+                "dsh 的 node.exe 进程，不会去结束别的程序；dsh 很可能因端口冲突起不来，"
+                "可在「设置」里换一个端口再试。"
+            )
+
+        # --no-open：dsh 默认会在启动后把带令牌的地址交给系统默认浏览器打开
+        # （Config 里 openBrowser 默认就是 true）。本程序自己有内嵌视图，工具栏
+        # 上还专门放了一个「打开浏览器」按钮，再自动弹一个外部浏览器既多余，
+        # 又会多起一个 node 启动器进程。这个开关只关掉浏览器交接，不影响地址
+        # 打印（printUrl 同为默认 true），所以下面从 stdout 解析地址照旧成立。
+        args = ["web", "--no-open"]
         if self._port:
             args += ["--port", str(self._port)]
 
@@ -246,40 +356,58 @@ class DshManager(QObject):
         self._reader.start()
         return True
 
-    def _probe_existing_server(self):
-        """探测配置端口上有没有已经能响应的服务；有则返回其 URL，没有返回 None。
+    def _reclaim_orphan_server(self):
+        """回收占用配置端口的残留 dsh，返回 ``(已结束的 PID 列表, 仍占用端口的 PID 列表)``。
 
-        只是想知道「有没有东西在应答」，不关心具体返回什么内容或状态码——
-        HTTPError 本身就说明端口上有服务在处理请求。
+        只动镜像名是 node.exe 的监听者：端口被别的程序占着时，宁可让后面的
+        启动流程照常去撞 EADDRINUSE 由 dsh 自己报错，也不要误杀别人的进程。
+        GetExtendedTcpTable 只是读一张表，比先发 HTTP 探测再回头查进程更省，
+        也不会因为安全软件丢包而白等一个超时。
+
+        「有没有回收成功」不看 taskkill 的返回码，只看**端口是否真的让开了**。
+        原因：taskkill /T 要遍历整棵进程树，只要树里恰好有子进程正在退出，
+        它就会报错并把返回码置成 128（实测 8 次里中 1 次），而目标进程其实
+        已经被结束。拿返回码当判据会漏报，把「其实已经清干净了」误判成失败；
+        反过来，若进程还活着，端口会继续报有人监听，也骗不过去。
         """
-        url = f"http://127.0.0.1:{self._port}"
-        try:
-            urllib.request.urlopen(url, timeout=_PROBE_TIMEOUT)
-        except urllib.error.HTTPError:
-            pass
-        except Exception:
-            return None
-        return url
+        present = sorted(_listener_pids(self._port))
+        candidates = [pid for pid in present if _pid_image_name(pid) == "node.exe"]
+        if not candidates:
+            # 端口本来就空着（最常见）或占用者是别的程序：立刻返回，不做任何等待。
+            return [], present
+
+        for pid in candidates:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=5,
+                    **_hidden_window_kwargs(),
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                # 杀不掉也不能就此认定失败：下面统一以端口状态为准。
+                pass
+
+        # taskkill 返回时监听套接字不一定已经释放（内核里的关闭是异步的），
+        # 立刻重启会撞上 EADDRINUSE。轮询到端口真正让开为止，比死等固定时长
+        # 既更快（通常不到半秒）又更可靠（不会在慢机器上等不够）。
+        deadline = time.time() + 2.0
+        while time.time() < deadline and _listener_pids(self._port):
+            time.sleep(0.1)
+        remaining = sorted(_listener_pids(self._port))
+        reclaimed = [pid for pid in candidates if pid not in remaining]
+        return reclaimed, remaining
 
     def stop(self) -> None:
-        if self._adopted:
-            self._adopted = False
-            self._url = None
-            self.log_line.emit(
-                "[停止] 这是接上的外部 dsh 实例，不是本程序启动的，不会去结束它的进程——只是断开显示。"
-            )
-            self.stopped.emit(0)
-            return
         proc = self._proc
         if proc is None or proc.poll() is not None:
             self._proc = None
             return
         # 用 taskkill 结束整棵进程树（node 可能再拉起子进程）。
-        # taskkill 失败时不会抛异常，只是返回非零码，所以要显式判断返回值，
-        # 否则杀不掉进程时界面会一直卡在「运行中」。
-        killed = False
         try:
-            result = subprocess.run(
+            subprocess.run(
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -289,13 +417,18 @@ class DshManager(QObject):
                 timeout=5,
                 **_hidden_window_kwargs(),
             )
-            killed = result.returncode == 0
         except subprocess.TimeoutExpired:
             self.log_line.emit("[停止] taskkill 超时，改为直接结束主进程。")
         except Exception as exc:  # noqa: BLE001
             self.log_line.emit(f"[停止] taskkill 无法执行：{exc}")
-        # 进程仍活着才需要兜底，避免它已自行退出时打出多余的提示。
-        if not killed and proc.poll() is None:
+        # 判据是「进程是否真的没了」，不是 taskkill 的返回码：/T 遍历进程树时
+        # 返回码不可靠（可能报错而进程其实已结束，实测会复现），拿它判断会打出
+        # 一句多余的「未能结束进程树」。轮询能让正常退出被立刻识别，
+        # 只有进程确实还活着才走兜底，避免它已退出时误报。
+        deadline = time.time() + 2.0
+        while time.time() < deadline and proc.poll() is None:
+            time.sleep(0.1)
+        if proc.poll() is None:
             self.log_line.emit("[停止] taskkill 未能结束进程树，改为直接结束主进程。")
             try:
                 proc.kill()
