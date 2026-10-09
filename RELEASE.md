@@ -71,6 +71,25 @@ git push origin main vX.Y.Z
 网络是间歇性的：某 IP 可能几分钟内从可达变不可达。建议写个小循环轮换 IP
 重试（每轮 30 秒），或直接跑若干分钟的后台脚本。
 
+### 注意：push 卡住 25 秒然后失败，未必是网络问题
+
+实测踩过这个坑：`git push` 每次都在 **25 秒**后失败，症状看着像网络，
+实际卡在 **凭据助手**上 —— PortableGit 自带的 `credential.helper=helper-selector`
+（一个弹窗选择器）在无交互环境里拿不到凭据，就静静等到超时。真凶与 DNS 无关。
+
+绕过办法：本次命令里显式指定用 Windows 凭据管理器，并清掉那层选择器：
+
+```bash
+git -c credential.helper= -c credential.helper=wincred push origin main
+```
+
+另外本机的代理是分应用的：shell 里预设的 `HTTP_PROXY=127.0.0.1:60830` 并不放行
+github.com，而本机自己的代理端口（7890/7891）是通的。所以推送时要么用
+`env -u HTTP_PROXY -u HTTPS_PROXY` 去掉预设代理，要么显式指向能用的那个。
+
+> 判断顺序建议：先看**卡了多久**。卡在整 25 秒 → 先怀疑 `credential.helper`
+> （用上面的命令直接验证）；秒退报 RST/443 → 才是 DNS 污染，走上面的 hosts 办法。
+
 ## 三、打包
 
 ```bash
@@ -91,8 +110,13 @@ python -m PyInstaller dsh_gui_onedir.spec --noconfirm --clean
 > 打进去，安装后「关于」里的版本号是新的、跑起来却是旧的 —— 这种错误从产物上
 > 完全看不出来，只能靠比对 `dist\DSH-Desktop\DSH-Desktop.exe` 的时间戳识破。
 >
-> 两种产物的大小差别很大（单文件版约 8 MB，目录版的 exe 只有约 2.2 MB，
-> 因为依赖 DLL 都摊在同目录里），别把大小当成构建失败的信号。
+> 两种产物的大小差别很大（单文件版约 209 MB —— Python 运行时和 Qt 全被打进
+> 这一个文件；目录版的 exe 本身只有约 1.9 MB，真正的依赖约 564 MB、近 3000 个
+> 文件都摊在同目录的 `_internal\` 里。安装包最终约 142 MB，是压过的）。
+> 别把大小当成构建失败的信号 —— 反过来说，**如果单文件版只有 8 MB 左右，
+> 那不是「构建很快」，而是 PySide6 没打进包里的残废产物**，装上必然启动失败。
+> 判断办法：看构建日志旁的 `build\*\warn-*.txt`，出现
+> `missing module named PySide6` 就是它。
 
 打包前确认：release/screenshot.png 是最新截图（该目录被 gitignore，不会自动更新）。
 
