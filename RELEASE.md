@@ -74,12 +74,25 @@ git push origin main vX.Y.Z
 ## 三、打包
 
 ```bash
-# 1. 生成单文件 exe（约 3-4 分钟，产物 dist/DSH-Desktop.exe）
+# 1. 生成单文件 exe（产物 dist/DSH-Desktop.exe，作为 Releases 资产发给用户）
 python -m PyInstaller dsh_gui.spec --noconfirm --clean
 
-# 2. 生成安装包（约 12 秒，产物 installer_output/DSH-Desktop-Setup.exe）
+# 2. 生成目录版（产物 dist/DSH-Desktop\，这是安装包的**源**，必须一起重建！）
+python -m PyInstaller dsh_gui_onedir.spec --noconfirm --clean
+
+# 3. 生成安装包（约 12 秒，产物 installer_output/DSH-Desktop-Setup.exe）
 & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' dsh_client_setup.iss
 ```
+
+> ⚠️ 第 2 步不能省。本项目出两种产物（见 build_common.py 的说明）：
+> `dsh_gui.spec` 是免安装单文件版，`dsh_gui_onedir.spec` 是安装包内部用的目录版。
+> `dsh_client_setup.iss` 的 `[Files]` 是从 `dist\DSH-Desktop\` 整目录拷贝的，
+> 而那个目录**只由第 2 步产出**。跳过第 2 步的话，安装包会把上一次构建的旧代码
+> 打进去，安装后「关于」里的版本号是新的、跑起来却是旧的 —— 这种错误从产物上
+> 完全看不出来，只能靠比对 `dist\DSH-Desktop\DSH-Desktop.exe` 的时间戳识破。
+>
+> 两种产物的大小差别很大（单文件版约 8 MB，目录版的 exe 只有约 2.2 MB，
+> 因为依赖 DLL 都摊在同目录里），别把大小当成构建失败的信号。
 
 打包前确认：release/screenshot.png 是最新截图（该目录被 gitignore，不会自动更新）。
 
